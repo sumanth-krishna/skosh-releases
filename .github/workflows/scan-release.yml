@@ -1,0 +1,49 @@
+# Scan a published Skosh for Mac release for anything secret before people download it: unpacks
+# the app & searches every file for keys, tokens & env files. Prints file names & the kind of
+# match only, never the matched value. Started by hand (Actions > Scan a release).
+name: Scan a release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to scan, e.g. mac-1.0.0-8c68120"
+        required: true
+permissions:
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download & unpack
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p 'Skosh-mac.zip' -D rel
+          mkdir app && cd app && unzip -q ../rel/Skosh-mac.zip
+          find . -name '*.asar' | while read -r a; do npx --yes @electron/asar extract "$a" "${a%.asar}.unpacked-scan"; done
+          echo "files: $(find . -type f | wc -l)"
+      - name: Look for secrets
+        run: |
+          cd app
+          hits=0
+          check() { # $1 = label, $2 = regex
+            files=$(grep -rIlE "$2" . 2>/dev/null | grep -v -E '/(test|tests|__tests__|fixtures)/' || true)
+            if [ -n "$files" ]; then echo "MATCH [$1]:"; echo "$files" | head -20; hits=$((hits+1)); fi
+          }
+          check "Anthropic key" 'sk-ant-[A-Za-z0-9_-]{20,}'
+          check "OpenAI key" 'sk-(proj-)?[A-Za-z0-9]{32,}'
+          check "Slack token" 'xox[abprs]-[0-9A-Za-z-]{20,}|xapp-1-[0-9A-Za-z-]{20,}'
+          check "GitHub token" 'gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{40,}'
+          check "AWS key" 'AKIA[0-9A-Z]{16}'
+          check "Google OAuth secret" 'GOCSPX-[A-Za-z0-9_-]{20,}'
+          check "Google API key" 'AIza[0-9A-Za-z_-]{35}'
+          check "Private key" '-----BEGIN (RSA |EC |OPENSSH |)PRIVATE KEY-----'
+          check "Supabase service role JWT" 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.[A-Za-z0-9_-]*cm9sZSI6InNlcnZpY2Vfcm9sZS'
+          envs=$(find . -type f \( -name '.env' -o -name '.env.*' \) ! -name '.env.example' || true)
+          if [ -n "$envs" ]; then echo "MATCH [env file]:"; echo "$envs"; hits=$((hits+1)); fi
+          dataf=$(find . -type d -path '*/data/candidates' -o -type f -name 'gmail-tokens*' || true)
+          if [ -n "$dataf" ]; then echo "MATCH [engine data]:"; echo "$dataf"; hits=$((hits+1)); fi
+          echo "kinds matched: $hits"
+          test "$hits" -eq 0
