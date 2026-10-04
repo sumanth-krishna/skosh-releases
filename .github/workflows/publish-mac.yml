@@ -1,0 +1,57 @@
+# Publish a Skosh for Mac build: copies the installer from a finished "Skosh for Mac" build in the
+# private skosh-engine repo into a release here, so getskosh.com/download/mac always serves the
+# newest. Runs only when someone with write access starts it (Actions > Publish Skosh for Mac).
+# Needs the secret ENGINE_ARTIFACTS_TOKEN: a fine-grained token with read access to skosh-engine's
+# Actions (nothing else). It never builds or changes code.
+name: Publish Skosh for Mac
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "The skosh-engine build run to publish (blank = newest successful build of the desktop branch)"
+        required: false
+      tag:
+        description: "Release tag, e.g. mac-1.0.0-8c68120"
+        required: true
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find the build
+        env:
+          GH_TOKEN: ${{ secrets.ENGINE_ARTIFACTS_TOKEN }}
+          RUN_INPUT: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          RUN="$RUN_INPUT"
+          if [ -z "$RUN" ]; then
+            RUN=$(gh run list -R sumanth-krishna/skosh-engine --workflow "Skosh for Mac" --branch desktop --status success --limit 1 --json databaseId -q '.[0].databaseId')
+          fi
+          SHA=$(gh run view "$RUN" -R sumanth-krishna/skosh-engine --json headSha -q '.headSha')
+          echo "RUN=$RUN" >> "$GITHUB_ENV"
+          echo "SHA=$SHA" >> "$GITHUB_ENV"
+      - name: Download the installer
+        env:
+          GH_TOKEN: ${{ secrets.ENGINE_ARTIFACTS_TOKEN }}
+        run: gh run download "$RUN" -R sumanth-krishna/skosh-engine -p 'Skosh-mac-*' -D build
+      - name: Stage the files
+        run: |
+          set -euo pipefail
+          DMG=$(find build -name '*.dmg' | head -1)
+          ZIP=$(find build -name '*-mac.zip' | head -1)
+          test -n "$DMG"
+          cp "$DMG" Skosh-mac.dmg
+          if [ -n "$ZIP" ]; then cp "$ZIP" Skosh-mac.zip; fi
+          sha256sum Skosh-mac.* > SHA256SUMS.txt
+          ls -la Skosh-mac.* SHA256SUMS.txt
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          FILES="Skosh-mac.dmg SHA256SUMS.txt"
+          if [ -f Skosh-mac.zip ]; then FILES="$FILES Skosh-mac.zip"; fi
+          gh release create "$TAG" $FILES -R "$GITHUB_REPOSITORY" --title "Skosh for Mac ($TAG)" --notes "Built from skosh-engine ${SHA:0:7}. Download: https://www.getskosh.com/download/mac. Not yet notarized by Apple: the first time, open System Settings > Privacy & Security & click Open Anyway." --latest
